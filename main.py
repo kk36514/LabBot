@@ -7,8 +7,6 @@ Original file is located at
     https://colab.research.google.com/drive/16jMoyrUwk67Gs0a-eE_ExI1GI34sNS2R
 """
 
-!pip install discord.py anthropic
-
 import discord, sqlite3, os, csv, io, datetime, asyncio
 from collections import Counter
 from discord.ext import commands
