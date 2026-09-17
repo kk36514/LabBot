@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """LabBot — Discord intel bot with Firebase Realtime Database persistence."""
 
-import discord, os, io, datetime, asyncio
+import discord, os, io, sqlite3, datetime, asyncio
 from collections import Counter
 from discord.ext import commands
 import anthropic
