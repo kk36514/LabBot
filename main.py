@@ -473,8 +473,7 @@ async def on_ready():
     guild = discord.Object(id=GUILD_ID)
     bot.tree.clear_commands(guild=guild)      # wipe stale guild copies (Colab re-run safety)
     bot.tree.copy_global_to(guild=guild)      # copy current commands to the guild
-    await bot.tree.sync(guild=guild)          # push to guild instantly — no 1-hour wait
-    await bot.tree.sync()                     # keep the global set in sync too
+    await bot.tree.sync(guild=guild)          # push to guild only — no global sync, no duplicates
     print(f"Online as {bot.user}")
 
 
@@ -496,6 +495,92 @@ async def main():
             await bot.start(token)
     else:
         print("Error: No Discord token found in environment variables or Colab secrets.")
+        
+# --- Keep-alive + Dashboard web server ---
+
+async def handle_ping(request):
+    return web.Response(text="pong")
+
+def render_dashboard():
+    """Build the dashboard HTML from the reports table."""
+    total = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
+    verified = conn.execute("SELECT COUNT(*) FROM reports WHERE verified = 1").fetchone()[0]
+    orgs = conn.execute(
+        "SELECT org, COUNT(*) as c FROM reports GROUP BY org ORDER BY c DESC"
+    ).fetchall()
+    actions = conn.execute(
+        "SELECT action, COUNT(*) as c FROM reports GROUP BY action ORDER BY c DESC LIMIT 10"
+    ).fetchall()
+    recent = conn.execute(
+        "SELECT id, org, action, location, timestamp FROM reports ORDER BY id DESC LIMIT 20"
+    ).fetchall()
+
+    org_rows = "".join(
+        f"<tr><td>{org}</td><td>{count}</td></tr>" for org, count in orgs
+    ) or "<tr><td colspan=2>No data yet</td></tr>"
+    action_rows = "".join(
+        f"<tr><td>{action}</td><td>{count}</td></tr>" for action, count in actions
+    ) or "<tr><td colspan=2>No data yet</td></tr>"
+    recent_rows = "".join(
+        f"<tr><td>#{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td><td>{r[4][:16]}</td></tr>" for r in recent
+    ) or "<tr><td colspan=5>No reports yet</td></tr>"
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LabBot Intel Dashboard</title>
+<style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1115; color: #e8e8e8; margin: 0; padding: 2rem; }}
+    h1 {{ color: #ff4d4d; margin-bottom: 0.25rem; }}
+    .sub {{ color: #888; margin-bottom: 2rem; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
+    .card {{ background: #1a1d24; border: 1px solid #2a2e38; border-radius: 10px; padding: 1rem; }}
+    .card .num {{ font-size: 2rem; font-weight: 700; color: #ff4d4d; }}
+    .card .label {{ color: #999; font-size: 0.85rem; }}
+    h2 {{ color: #ccc; margin: 1.5rem 0 0.5rem; }}
+    table {{ width: 100%; border-collapse: collapse; background: #1a1d24; border-radius:  ical10px; overflow: hidden; }}
+    th, td {{ padding: 0.6rem 0.8rem; text-align: left; border-bottom:  ical1px solid #2a2e38; font-size: 0.9rem; }}
+    th {{ background: #23262e; color: #ff4d4d; font-weight: 600; }}
+    tr:hover td {{ background: #22252d; }}
+    .footer {{ margin-top: 2rem; color: #555; font-size: 0.8rem; }}
+</style>
+</head>
+<body>
+    <h1>🛰️ LabBot Intel</h1>
+    <div class="sub">Live intel database — auto-refreshes</div>
+    <div class="cards">
+        <div class="card"><div class="num">{total}</div><div class="label">Total Reports</div></div>
+        <div class="card"><div class="num">{verified}</div><div class="label">Verified</div></div>
+        <div class="card"><div class="num">{len(orgs)}</div><div class="label">Organizations</div></div>
+    </div>
+    <h2>Activity by Organization</h2>
+    <table><thead><tr><th>Organization</th><th>Reports</th></tr></thead><tbody>{org_rows}</tbody></table>
+    <h2>Top Actions</h2>
+    <table><thead><tr><th>Action</th><th>Count</th></tr></thead><tbody>{action_rows}</tbody></table>
+    <h2>Recent Reports</h2>
+    <table><thead><tr><th>ID</th><th>Org</th><th>Action</th><th>Location</th><th>Timestamp</th></tr></thead><tbody>{recent_rows}</tbody></table>
+    <div class="footer">LabBot — auto-refreshes every 60s</div>
+    <script>
+        setTimeout(() => location.reload(), 60000);
+    </script>
+</body>
+</html>"""
+
+async def handle_dashboard(request):
+    return web.Response(text=render_dashboard(), content_type="text/html")
+
+async def start_keepalive_server():
+    app = web.Application()
+    app.router.add_get("/ping", handle_ping)
+    app.router.add_get("/", handle_dashboard)
+    app.router.add_get("/dashboard", handle_dashboard)
+    port = int(os.environ.get("PORT", 8000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    print(f"Web server (dashboard + keep-alive) listening on port {port}")
 
 
 if __name__ == "__main__":
