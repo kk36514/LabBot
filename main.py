@@ -63,7 +63,6 @@ DEFAULT_ORG = "The Lab"
 print("Database prepared and migrations applied.")
 
 import discord
-from google.colab import userdata, drive, files
 from discord.ext import commands
 import anthropic
 import datetime
@@ -72,14 +71,28 @@ import sqlite3
 import csv
 import io
 import folium
+import os
 from collections import Counter
+
+# Safely handle google.colab imports for local/Render deployment compatibility
+try:
+    from google.colab import userdata, drive, files
+    HAS_COLAB = True
+except ImportError:
+    HAS_COLAB = False
+    class UserdataMock:
+        def get(self, key):
+            return os.environ.get(key)
+    userdata = UserdataMock()
 
 # Define intents BEFORE creating the bot instance
 intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-client = anthropic.AsyncAnthropic(api_key=userdata.get("ANTHROPIC_API_KEY"))
+
+anthropic_api_key = userdata.get("ANTHROPIC_API_KEY")
+client = anthropic.AsyncAnthropic(api_key=anthropic_api_key) if anthropic_api_key else None
 
 def get_setting(key):
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
@@ -135,312 +148,6 @@ async def track(interaction: discord.Interaction, org: str = DEFAULT_ORG, limit:
     lines = [f"• `#{r[0]}` **{r[1]}** — {r[2]} ({r[3][:16]})" for r in rows]
     await interaction.followup.send(embed=discord.Embed(title=f"Intel on {org}", description="\n".join(lines), color=discord.Color.red()))
 
-# --- data exploration ---
-@bot.tree.command(name="summary", description="Count actions per org")
-async def summary(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    rows = conn.execute("SELECT org, COUNT(*) FROM reports GROUP BY org").fetchall()
-    if not rows:
-        await interaction.followup.send("No Intel stored yet.")
-        return
-    desc = "\n".join([f"**{r[0]}**: {r[1]} reports" for r in rows])
-    await interaction.followup.send(embed=discord.Embed(title="Intel Summary by Org", description=desc, color=discord.Color.blue()))
-
-@bot.tree.command(name="location", description="List sightings at a specific place")
-async def location(interaction: discord.Interaction, place: str):
-    await interaction.response.defer(ephemeral=False)
-    rows = conn.execute("SELECT id, org, action, timestamp FROM reports WHERE lower(location) LIKE ? ORDER BY id DESC", (f"%{place.lower()}%",)).fetchall()
-    if not rows:
-        await interaction.followup.send(f"No reports found matching location '{place}'.")
-        return
-    lines = [f"• `#{r[0]}` **{r[1]}** did **{r[2]}** ({r[3][:16]})" for r in rows]
-    await interaction.followup.send(embed=discord.Embed(title=f"Sightings near: {place}", description="\n".join(lines), color=discord.Color.green()))
-
-@bot.tree.command(name="trend", description="Reports per day over the last N days")
-async def trend(interaction: discord.Interaction, days: int = 7):
-    await interaction.response.defer(ephemeral=False)
-    rows = conn.execute("SELECT date(timestamp), COUNT(*) FROM reports GROUP BY date(timestamp) ORDER BY date(timestamp) DESC LIMIT ?", (days,)).fetchall()
-    if not rows:
-        await interaction.followup.send("No data found for trends.")
-        return
-    desc = "\n".join([f"📆 `{r[0]}`: {r[1]} reports" for r in rows])
-    await interaction.followup.send(embed=discord.Embed(title=f"Intel Activity Trend (Last {days} Days)", description=desc, color=discord.Color.orange()))
-
-@bot.tree.command(name="timeline", description="Full chronological view of an org")
-async def timeline(interaction: discord.Interaction, org: str = DEFAULT_ORG):
-    await interaction.response.defer(ephemeral=False)
-    rows = conn.execute("SELECT timestamp, action, location, reported_by FROM reports WHERE lower(org) = lower(?) ORDER BY timestamp ASC", (org,)).fetchall()
-    if not rows:
-        await interaction.followup.send(f"No chronological details on {org}.")
-        return
-    lines = [f"⏱️ `[{r[0][:16]}]` **{r[1]}** at *{r[2]}* (via {r[3]})" for r in rows]
-    await interaction.followup.send(embed=discord.Embed(title=f"Full Timeline: {org}", description="\n".join(lines[:25]), color=discord.Color.purple()))
-
-@bot.tree.command(name="keywords", description="Search notes and actions for keywords")
-async def keywords(interaction: discord.Interaction, query: str):
-    await interaction.response.defer(ephemeral=False)
-    rows = conn.execute("SELECT id, org, action, notes FROM reports WHERE lower(action) LIKE ? OR lower(notes) LIKE ?", (f"%{query.lower()}%", f"%{query.lower()}%",)).fetchall()
-    if not rows:
-        await interaction.followup.send(f"No matches for `{query}` found.")
-        return
-    lines = [f"`#{r[0]}` **{r[1]}**: {r[2]} (Notes: *{r[3]}*)" for r in rows]
-    await interaction.followup.send(embed=discord.Embed(title=f"Keyword search results: '{query}'", description="\n".join(lines[:15]), color=discord.Color.teal()))
-
-@bot.tree.command(name="stats", description="Overall intel stats")
-async def stats(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    total = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
-    top_org = conn.execute("SELECT org, COUNT(*) as c FROM reports GROUP BY org ORDER BY c DESC LIMIT 1").fetchone()
-    top_reporter = conn.execute("SELECT reported_by, COUNT(*) as c FROM reports GROUP BY reported_by ORDER BY c DESC LIMIT 1").fetchone()
-    busiest_day = conn.execute("SELECT date(timestamp), COUNT(*) as c FROM reports GROUP BY date(timestamp) ORDER BY c DESC LIMIT 1").fetchone()
-
-    embed = discord.Embed(title="📊 Intel Center Statistics", color=discord.Color.gold())
-    embed.add_field(name="Total Reports Logged", value=str(total), inline=False)
-    if top_org: embed.add_field(name="Highest Risk Target", value=f"{top_org[0]} ({top_org[1]} logs)", inline=True)
-    if top_reporter: embed.add_field(name="Primary Informant", value=f"{top_reporter[0]} ({top_reporter[1]} logs)", inline=True)
-    if busiest_day: embed.add_field(name="Busiest Operational Window", value=f"{busiest_day[0]} ({busiest_day[1]} reports)", inline=False)
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="export", description="Export all intel to CSV on Drive")
-async def export(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Access denied.", ephemeral=True); return
-    try:
-        rows = conn.execute("SELECT * FROM reports").fetchall()
-        cursor = conn.cursor()
-        cursor.execute("PRAGMA table_info(reports)")
-        cols = [r[1] for r in cursor.fetchall()]
-
-        output_path = "/content/drive/MyDrive/exported_intel.csv"
-        with open(output_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(cols)
-            writer.writerows(rows)
-
-        file = discord.File(output_path, filename="exported_intel.csv")
-        await interaction.followup.send("✅ Intel successfully exported to Google Drive.", file=file, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Export failure: {e}", ephemeral=True)
-
-@bot.tree.command(name="heatmap", description="Render a folium map of geotagged reports")
-async def heatmap(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    rows = conn.execute("SELECT lat, lon, org, action, location FROM reports WHERE lat IS NOT NULL AND lon IS NOT NULL").fetchall()
-    if not rows:
-        await interaction.followup.send("❌ No geotagged intel available to draw heatmaps.")
-        return
-
-    # Generate base Map
-    m = folium.Map(location=[rows[0][0], rows[0][1]], zoom_start=12)
-    for lat, lon, org, action, loc in rows:
-        folium.Marker(
-            [lat, lon],
-            popup=f"<b>{org}</b>: {action} at {loc}",
-            icon=folium.Icon(color='red', icon='info-sign')
-        ).add_to(m)
-
-    html_path = "/content/drive/MyDrive/intel_heatmap.html"
-    m.save(html_path)
-    file = discord.File(html_path, filename="intel_heatmap.html")
-    await interaction.followup.send("🗺️ Map rendering complete. Download the attached interactive map below:", file=file)
-
-# --- Management commands ---
-@bot.tree.command(name="edit_report", description="Edit a field of a report")
-async def edit_report(interaction: discord.Interaction, report_id: int, field: str, value: str):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    valid_fields = ['org', 'action', 'location', 'notes', 'tags', 'lat', 'lon']
-    if field not in valid_fields:
-        await interaction.followup.send(f"❌ Invalid field. Pick from {valid_fields}", ephemeral=True); return
-    try:
-        conn.execute(f"UPDATE reports SET {field} = ? WHERE id = ?", (value, report_id))
-        conn.commit()
-        await interaction.followup.send(f"✅ Updated field `{field}` on report `#{report_id}`.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-@bot.tree.command(name="delete_report", description="Delete a report")
-async def delete_report(interaction: discord.Interaction, report_id: int):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    try:
-        conn.execute("DELETE FROM reports WHERE id = ?", (report_id,))
-        conn.commit()
-        await interaction.followup.send(f"✅ Erased report `#{report_id}`.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-@bot.tree.command(name="verify", description="Mark a report as verified")
-async def verify(interaction: discord.Interaction, report_id: int):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    try:
-        conn.execute("UPDATE reports SET verified = 1 WHERE id = ?", (report_id,))
-        conn.commit()
-        await interaction.followup.send(f"✅ Report `#{report_id}` flagged as VERIFIED.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-@bot.tree.command(name="tag", description="Add tags to a report")
-async def tag(interaction: discord.Interaction, report_id: int, tags: str):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    try:
-        current = conn.execute("SELECT tags FROM reports WHERE id = ?", (report_id,)).fetchone()
-        updated_tags = f"{current[0]}, {tags}" if current and current[0] else tags
-        conn.execute("UPDATE reports SET tags = ? WHERE id = ?", (updated_tags, report_id))
-        conn.commit()
-        await interaction.followup.send(f"✅ Appended tags to report `#{report_id}`.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-# --- Alert & access commands ---
-@bot.tree.command(name="watch", description="Alert a channel when a keyword appears in new reports")
-async def watch(interaction: discord.Interaction, keyword: str, channel: discord.TextChannel):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    conn.execute("INSERT OR REPLACE INTO watches (keyword, channel_id) VALUES (?, ?)", (keyword.lower(), str(channel.id)))
-    conn.commit()
-    await interaction.followup.send(f"👀 Now watching for `{keyword}`. Notifications will deliver to {channel.mention}.", ephemeral=True)
-
-@bot.tree.command(name="unwatch", description="Remove a keyword watch")
-async def unwatch(interaction: discord.Interaction, keyword: str):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    conn.execute("DELETE FROM watches WHERE keyword = ?", (keyword.lower(),))
-    conn.commit()
-    await interaction.followup.send(f"✅ Watch for `{keyword}` removed.", ephemeral=True)
-
-@bot.tree.command(name="digest_channel", description="Set the digest channel")
-async def digest_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    set_setting("digest_channel", channel.id)
-    await interaction.followup.send(f"⚙️ Daily Intel Digest channel configured to {channel.mention}.", ephemeral=True)
-
-@bot.tree.command(name="quiet_hours", description="Suppress digests between set hours (HH:MM-HH:MM)")
-async def quiet_hours(interaction: discord.Interaction, range_str: str):
-    await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission Denied.", ephemeral=True); return
-    set_setting("quiet_hours", range_str)
-    await interaction.followup.send(f"⚙️ Quiet hours established: `{range_str}`.", ephemeral=True)
-
-@bot.tree.command(name="role_required", description="Restrict commands to a specific role")
-async def role_required(interaction: discord.Interaction, role_name: str):
-    await interaction.response.defer(ephemeral=True)
-    # Anyone can configure if no role exists yet, or they have admin
-    if not interaction.user.guild_permissions.administrator and get_setting("required_role"):
-        if not check_access(interaction):
-            await interaction.followup.send("❌ Administrator clearance required.", ephemeral=True); return
-    set_setting("required_role", role_name)
-    await interaction.followup.send(f"🔐 Operational access restricted to users carrying the role: **{role_name}**.", ephemeral=True)
-
-# --- AI commands ---
-@bot.tree.command(name="ask", description="Ask LabBot anything (context-aware)")
-async def ask(interaction: discord.Interaction, question: str):
-    await interaction.response.defer(ephemeral=False)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission denied.", ephemeral=True); return
-    try:
-        response = await client.messages.create(
-            model="claude-3-opus-20240229",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": question}]
-        )
-        await interaction.followup.send(response.content[0].text)
-    except Exception as e:
-        await interaction.followup.send(f"❌ AI Error: {e}")
-
-@bot.tree.command(name="analyze", description="Analyze recent intel with AI")
-async def analyze(interaction: discord.Interaction, limit: int = 15):
-    await interaction.response.defer(ephemeral=False)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission denied.", ephemeral=True); return
-    rows = conn.execute("SELECT org, action, location, notes, timestamp FROM reports ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    if not rows:
-        await interaction.followup.send("No intel logs to analyze."); return
-
-    context = "\n".join([f"- {r[4][:10]}: {r[0]} initiated {r[1]} at {r[2]} ({r[3]})" for r in rows])
-    prompt = f"Analyze the following security and movement intelligence and highlight any potential patterns, vulnerabilities, or anomalies:\n{context}"
-    try:
-        response = await client.messages.create(
-            model="claude-3-opus-20240229",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        await interaction.followup.send(embed=discord.Embed(title="💡 AI Tactical Analysis", description=response.content[0].text, color=discord.Color.purple()))
-    except Exception as e:
-        await interaction.followup.send(f"❌ AI Error: {e}")
-
-@bot.tree.command(name="brief", description="Generate a full AI intelligence brief on an org")
-async def brief(interaction: discord.Interaction, org: str = DEFAULT_ORG):
-    await interaction.response.defer(ephemeral=False)
-    if not check_access(interaction):
-        await interaction.followup.send("❌ Permission denied.", ephemeral=True); return
-    rows = conn.execute("SELECT action, location, notes, timestamp, verified FROM reports WHERE lower(org) = lower(?)", (org,)).fetchall()
-    if not rows:
-        await interaction.followup.send(f"No reports on file for {org}."); return
-
-    context = "\n".join([f"- {r[3][:10]}: {r[0]} at {r[1]}. Verified: {bool(r[4])}. (Notes: {r[2]})" for r in rows])
-    prompt = f"Generate a comprehensive tactical intelligence briefing packet about the organization '{org}' using these intelligence reports:\n{context}"
-    try:
-        response = await client.messages.create(
-            model="claude-3-opus-20240229",
-            max_tokens=1500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        await interaction.followup.send(embed=discord.Embed(title=f"📁 Strategic Intelligence Brief: {org}", description=response.content[0].text[:4000], color=discord.Color.dark_red()))
-    except Exception as e:
-        await interaction.followup.send(f"❌ AI Error: {e}")
-
-# --- Utility help ---
-@bot.tree.command(name="help", description="List all bot commands")
-async def help_command(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=False)
-    commands_list = [
-        "**🚨 Core Intel Logging**",
-        "`/report` - File a custom report with tags, coordinates, and attachments",
-        "`/track` - Show recent logs recorded against a target organization",
-        "",
-        "**📊 Investigation & Analytics**",
-        "`/summary` - Tally total reports per target organization",
-        "`/location` - Retrieve intelligence based on mapped locations",
-        "`/trend` - Display daily report rate fluctuations",
-        "`/timeline` - Render sequential history of targeted events",
-        "`/keywords` - Search internal descriptions and operational notes",
-        "`/stats` - Review performance, top targets, and primary contributors",
-        "`/export` - Send compiled raw data directly to connected cloud drive",
-        "`/heatmap` - Create spatial distributions of coordinate events",
-        "",
-        "**🛠️ Command Moderation**",
-        "`/edit_report` - Edit details on previously stored report files",
-        "`/delete_report` - Completely remove database entry records",
-        "`/verify` - Review and approve report details",
-        "`/tag` - Append markers to make cataloguing easier",
-        "",
-        "**🔑 Permission & Alerts**",
-        "`/watch` - Trigger automatic channels on specific key phases",
-        "`/unwatch` - Delete existing watch notifications",
-        "`/digest_channel` - Specify daily operations status channel",
-        "`/quiet_hours` - Temporarily disable night notifications",
-        "`/role_required` - Restrict general operation features to role access",
-        "",
-        "**🧠 Anthropic AI Integration**",
-        "`/ask` - Conversational inquiry with tactical support bot",
-        "`/analyze` - Pattern processing on latest reports",
-        "`/brief` - In-depth generation profile dossiers on key entities"
-    ]
-    await interaction.followup.send(embed=discord.Embed(title="🛰️ Operational Directory", description="\n".join(commands_list), color=discord.Color.blue()))
-
 GUILD_ID = 1549521458320113684  # your server ID
 
 @bot.event
@@ -478,7 +185,7 @@ async def main():
     if not token: # If not set as env variable, try Colab secrets
         try:
             from google.colab import userdata
-            token = userdata.get("BOT_API")
+            token = userdata.get("DISCORD_BOT_TOKEN")
         except Exception:
             print("DISCORD_BOT_TOKEN not found in environment or Colab secrets.")
             return
