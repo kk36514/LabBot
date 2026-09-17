@@ -143,8 +143,13 @@ import pandas as pd
 import io
 import folium
 
-# --- Clear existing commands from the tree to prevent registration errors ---
-bot.tree.clear_commands(guild=None)
+# Clear commands from the bot's internal command tree before re-registering
+# This prevents 'CommandAlreadyRegistered' errors when re-running the cell.
+# This is a development-time workaround for notebooks.
+if hasattr(bot.tree, '_global_commands'):
+    bot.tree._global_commands.clear()
+if hasattr(bot.tree, '_guild_commands'):
+    bot.tree._guild_commands.clear()
 
 # --- Analytics & Intel ---
 
@@ -168,6 +173,16 @@ async def location(interaction: discord.Interaction, loc: str):
     lines = [f"`#{r[0]}` **{r[1]}**: {r[2]} ({r[3][:10]})" for r in rows]
     await interaction.followup.send(embed=discord.Embed(title=f"Sightings at {loc}", description="\n".join(lines[:15])))
 
+@bot.tree.command(name="trend", description="Reports per day over the last N days")
+async def trend(interaction: discord.Interaction, days: int = 7):
+    await interaction.response.defer(ephemeral=True)
+    query = "SELECT date(timestamp), COUNT(*) FROM reports WHERE timestamp > date('now', ?) GROUP BY date(timestamp)"
+    rows = conn.execute(query, (f'-{days} days',)).fetchall()
+    if not rows:
+        await interaction.followup.send("No recent data for trends."); return
+    msg = "\n".join([f"`{date}`: {count} reports" for date, count in rows])
+    await interaction.followup.send(embed=discord.Embed(title=f"Intel Trend (Last {days} days)", description=msg))
+
 @bot.tree.command(name="timeline", description="Full chronological view of an org")
 async def timeline(interaction: discord.Interaction, org: str = DEFAULT_ORG):
     await interaction.response.defer(ephemeral=True)
@@ -177,7 +192,67 @@ async def timeline(interaction: discord.Interaction, org: str = DEFAULT_ORG):
     msg = "\n".join([f"`{r[0][:16]}`: {r[1]} - {r[2]}" for r in rows])
     await interaction.followup.send(embed=discord.Embed(title=f"Timeline: {org}", description=msg))
 
+@bot.tree.command(name="keywords", description="Search notes and actions for keywords")
+async def keywords(interaction: discord.Interaction, search_term: str):
+    await interaction.response.defer(ephemeral=True)
+    if not check_access(interaction): return
+    query = "SELECT id, org, action, notes FROM reports WHERE notes LIKE ? OR action LIKE ? ORDER BY id DESC LIMIT 15"
+    rows = conn.execute(query, (f"%{search_term}%", f"%{search_term}%",)).fetchall()
+    if not rows:
+        await interaction.followup.send(f"No reports found for keywords: {search_term}"); return
+    lines = [f"`#{r[0]}` **{r[1]}**: {r[2]} - {r[3][:50]}..." for r in rows]
+    await interaction.followup.send(embed=discord.Embed(title=f"Keyword Search: {search_term}", description="\n".join(lines)))
+
+@bot.tree.command(name="stats", description="Overall intel stats")
+async def stats(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    total = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
+    top_reporter = conn.execute("SELECT reported_by, COUNT(*) as c FROM reports GROUP BY reported_by ORDER BY c DESC LIMIT 1").fetchone()
+    verified = conn.execute("SELECT COUNT(*) FROM reports WHERE verified = 1").fetchone()[0]
+    embed = discord.Embed(title="Global Intel Stats", color=discord.Color.gold())
+    embed.add_field(name="Total Reports", value=str(total))
+    embed.add_field(name="Verified", value=str(verified))
+    if top_reporter: embed.add_field(name="Top Reporter", value=f"{top_reporter[0]} ({top_reporter[1]})")
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="heatmap", description="Render a folium map of geotagged reports")
+async def heatmap(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    rows = conn.execute("SELECT lat, lon, org, action FROM reports WHERE lat IS NOT NULL AND lon IS NOT NULL").fetchall()
+    if not rows:
+        await interaction.followup.send("No geotagged reports available to map."); return
+    
+    # Use the first valid coordinate to center the map, or a default if none
+    map_center = [rows[0][0], rows[0][1]] if rows else [0, 0]
+    m = folium.Map(location=map_center, zoom_start=2)
+    for r in rows:
+        # Ensure lat and lon are valid floats before adding marker
+        if isinstance(r[0], (float, int)) and isinstance(r[1], (float, int)):
+            folium.Marker([r[0], r[1]], popup=f"{r[2]}: {r[3]}").add_to(m)
+    
+    html_path = "map.html"
+    m.save(html_path)
+    await interaction.followup.send("Generated Heatmap:", file=discord.File(html_path))
+
 # --- Management ---
+
+@bot.tree.command(name="edit_report", description="Edit a field of a report")
+async def edit_report(interaction: discord.Interaction, report_id: int, field: str, new_value: str):
+    await interaction.response.defer(ephemeral=True)
+    if not check_access(interaction): return
+    valid_fields = ["org", "action", "location", "notes", "tags", "lat", "lon"]
+    if field not in valid_fields:
+        await interaction.followup.send(f"Invalid field. Choose from: {', '.join(valid_fields)}"); return
+    
+    if field in ["lat", "lon"]:
+        try:
+            new_value = float(new_value)
+        except ValueError:
+            await interaction.followup.send(f"Invalid value for {field}. Must be a number."); return
+    
+    conn.execute(f"UPDATE reports SET {field} = ? WHERE id = ?", (new_value, report_id))
+    conn.commit()
+    await interaction.followup.send(f"✅ Report `#{report_id}` {field} updated to `{new_value}`.")
 
 @bot.tree.command(name="delete_report", description="Delete a report")
 async def delete_report(interaction: discord.Interaction, report_id: int):
@@ -193,7 +268,14 @@ async def verify(interaction: discord.Interaction, report_id: int):
     conn.commit()
     await interaction.response.send_message(f"✅ Report `#{report_id}` verified.")
 
-# --- Alerts & AI ---
+@bot.tree.command(name="tag", description="Add tags to a report")
+async def tag(interaction: discord.Interaction, report_id: int, tags: str):
+    if not check_access(interaction): return
+    conn.execute("UPDATE reports SET tags = ? WHERE id = ?", (tags, report_id))
+    conn.commit()
+    await interaction.response.send_message(f"🏷️ Tags updated for `#{report_id}`.")
+
+# --- Alerts & Access ---
 
 @bot.tree.command(name="watch", description="Alert a channel when a keyword appears")
 async def watch(interaction: discord.Interaction, keyword: str, channel: discord.TextChannel = None):
@@ -202,6 +284,69 @@ async def watch(interaction: discord.Interaction, keyword: str, channel: discord
     conn.execute("INSERT OR REPLACE INTO watches (keyword, channel_id) VALUES (?, ?)", (keyword.lower(), ch_id))
     conn.commit()
     await interaction.response.send_message(f"👀 Watching for `{keyword}` in <#{ch_id}>.")
+
+@bot.tree.command(name="unwatch", description="Remove a keyword watch")
+async def unwatch(interaction: discord.Interaction, keyword: str):
+    if not check_access(interaction): return
+    conn.execute("DELETE FROM watches WHERE lower(keyword) = lower(?)", (keyword,))
+    conn.commit()
+    await interaction.response.send_message(f"🚫 Stopped watching for `{keyword}`.")
+
+@bot.tree.command(name="digest_channel", description="Set the channel for daily intel digests")
+async def digest_channel(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not check_access(interaction): return
+    set_setting("digest_channel_id", str(channel.id))
+    await interaction.response.send_message(f"✅ Daily intel digests will be sent to {channel.mention}.")
+
+@bot.tree.command(name="quiet_hours", description="Suppress digests between set hours (e.g., '22:00-06:00')")
+async def quiet_hours(interaction: discord.Interaction, hours_range: str = ""):
+    if not check_access(interaction): return
+    set_setting("quiet_hours", hours_range)
+    if hours_range:
+        await interaction.response.send_message(f"✅ Quiet hours set to {hours_range}.")
+    else:
+        await interaction.response.send_message("✅ Quiet hours disabled.")
+
+@bot.tree.command(name="role_required", description="Restrict commands to a role (blank = no restriction)")
+async def role_required(interaction: discord.Interaction, role_name: str = ""):
+    if not check_access(interaction): return # Only existing roles can change this
+    set_setting("required_role", role_name.lower())
+    if role_name:
+        await interaction.response.send_message(f"✅ Commands now restricted to users with the '{role_name}' role.")
+    else:
+        await interaction.response.send_message("✅ Command restrictions removed.")
+
+# --- AI Commands ---
+
+@bot.tree.command(name="ask", description="Ask LabBot anything (context-aware)")
+async def ask(interaction: discord.Interaction, question: str):
+    await interaction.response.defer()
+    if not client:
+        await interaction.followup.send("AI Client not configured."); return
+    rows = conn.execute("SELECT org, action, notes FROM reports ORDER BY id DESC LIMIT 5").fetchall()
+    context = "Recent Reports:\n" + "\n".join([f"{r[0]} did {r[1]}: {r[2]}" for r in rows])
+    resp = await client.messages.create(
+        model="claude-3-haiku-20240307", max_tokens=500,
+        messages=[{"role": "user", "content": f"Context: {context}\n\nQuestion: {question}"}]
+    )
+    await interaction.followup.send(resp.content[0].text)
+
+@bot.tree.command(name="analyze", description="Analyze recent intel with context")
+async def analyze(interaction: discord.Interaction, prompt: str = "Summarize recent activity."):
+    await interaction.response.defer()
+    if not client:
+        await interaction.followup.send("AI Client not configured."); return
+    
+    recent_reports = conn.execute("SELECT org, action, notes, timestamp FROM reports ORDER BY id DESC LIMIT 10").fetchall()
+    report_str = "\n".join([f"Org: {r[0]}, Action: {r[1]}, Notes: {r[2]}, Timestamp: {r[3]}" for r in recent_reports])
+    
+    full_prompt = f"Based on the following recent intel reports, {prompt}:\n\n{report_str}\n\nAnalysis:"
+    
+    resp = await client.messages.create(
+        model="claude-3-haiku-20240307", max_tokens=1000,
+        messages=[{"role": "user", "content": full_prompt}]
+    )
+    await interaction.followup.send(resp.content[0].text)
 
 @bot.tree.command(name="brief", description="Generate a full AI brief on an org")
 async def brief(interaction: discord.Interaction, org: str = DEFAULT_ORG):
@@ -216,11 +361,20 @@ async def brief(interaction: discord.Interaction, org: str = DEFAULT_ORG):
     )
     await interaction.followup.send(resp.content[0].text)
 
-# --- Utility ---
+# --- System & Utility ---
+
+@bot.tree.command(name="export", description="Export all intel to CSV")
+async def export_intel(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    df = pd.read_sql_query("SELECT * FROM reports", conn)
+    buf = io.BytesIO()
+    df.to_csv(buf, index=False)
+    buf.seek(0)
+    await interaction.followup.send("Full Export:", file=discord.File(buf, "intel_export.csv"))
 
 @bot.tree.command(name="help", description="List all commands")
 async def help_cmd(interaction: discord.Interaction):
-    h = "**Intel**: /report, /track, /summary, /location, /trend, /timeline, /stats, /export, /heatmap\n" \
+    h = "**Intel**: /report, /track, /summary, /location, /trend, /timeline, /keywords, /stats, /export, /heatmap\n" \
         "**Alerts**: /watch, /unwatch, /digest_channel, /quiet_hours\n" \
         "**Management**: /verify, /tag, /edit_report, /delete_report, /role_required\n" \
         "**AI**: /ask, /analyze, /brief"
