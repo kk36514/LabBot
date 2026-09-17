@@ -625,7 +625,13 @@ async def main():
 
     if token:
         print("Starting bot instance...")
-        await start_keepalive_server()
+        # Start the web server (dashboard + keep-alive) but never let a problem here kill the bot
+        try:
+            await start_keepalive_server()
+        except NameError:
+            print("⚠️ start_keepalive_server not found — continuing without web server.")
+        except Exception as e:
+            print(f"⚠️ Web server failed to start: {e} — continuing without it.")
         async with bot:
             await bot.start(token)
     else:
