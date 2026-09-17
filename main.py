@@ -7,7 +7,7 @@ Original file is located at
     https://colab.research.google.com/drive/16jMoyrUwk67Gs0a-eE_ExI1GI34sNS2R
 """
 
-!pip install discord.py anthropic
+
 
 import discord, sqlite3, os, csv, io, datetime, asyncio
 from collections import Counter
@@ -16,7 +16,7 @@ import anthropic
 
 # Removed Google Colab imports and Drive mounting since they are incompatible with Render.
 
-!pip install discord.py
+
 
 import sqlite3
 import os
@@ -451,36 +451,12 @@ async def on_ready():
     await bot.tree.sync()                   # keep the global set
     print(f"Online as {bot.user}")
 
-import discord
-from discord.ext import commands
 import asyncio
 import os
 
-intents = discord.Intents.default()
-intents.message_content = True
-
-try:
-    if 'bot' in globals():
-        asyncio.run_coroutine_threadsafe(bot.close(), asyncio.get_event_loop())
-except Exception:
-    pass
-
-bot = commands.Bot(command_prefix="!", intents=intents)
-
-# Safely register the on_ready handler if it exists in globals
-org_on_ready = globals().get('on_ready')
-if org_on_ready:
-    bot.add_listener(org_on_ready, 'on_ready')
-
-# Copy the command definitions dynamically to the new bot
-import sys
-import __main__
-for cmd in list(sys.modules['__main__'].__dict__.values()):
-    if isinstance(cmd, discord.app_commands.Command) or isinstance(cmd, discord.app_commands.Group):
-        try:
-            bot.tree.add_command(cmd)
-        except discord.app_commands.CommandAlreadyAdded:
-            pass
+# The bot and its intents are already defined in cell NEniaViAX2Zx.
+# The on_ready event is also already registered in cell qq9wiZGOccRd.
+# We just need to run the bot instance that has already been set up.
 
 try:
     cursor = conn.cursor()
@@ -498,9 +474,20 @@ except Exception as e:
 
 # Asynchronous main execution designed for both Colab and local Python scripts (Render)
 async def main():
-    token = os.environ.get("DISCORD_BOT_TOKEN", "BOT_API")
-    async with bot:
-        await bot.start(token)
+    token = os.environ.get("DISCORD_BOT_TOKEN") # Get token from environment variables
+    if not token: # If not set as env variable, try Colab secrets
+        try:
+            from google.colab import userdata
+            token = userdata.get("BOT_API")
+        except Exception:
+            print("DISCORD_BOT_TOKEN not found in environment or Colab secrets.")
+            return
+
+    if token:
+        async with bot:
+            await bot.start(token)
+    else:
+        print("Discord bot token is missing. Please set DISCORD_BOT_TOKEN in environment variables or Colab secrets.")
 
 if __name__ == "__main__":
     # Run asyncio loop safely without throwing top-level awaits errors
