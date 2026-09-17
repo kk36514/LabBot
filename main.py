@@ -7,18 +7,22 @@ Original file is located at
     https://colab.research.google.com/drive/16jMoyrUwk67Gs0a-eE_ExI1GI34sNS2R
 """
 
+!pip install discord.py anthropic
+
 import discord, sqlite3, os, csv, io, datetime, asyncio
 from collections import Counter
 from discord.ext import commands
-from google.colab import userdata, drive, files
 import anthropic
 
-drive.mount("/content/drive")
+# Removed Google Colab imports and Drive mounting since they are incompatible with Render.
+
+!pip install discord.py
 
 import sqlite3
 import os
 
-DB_PATH = "/content/drive/MyDrive/intel.db"
+# Using local project directory instead of Google Drive
+DB_PATH = "intel.db"
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -447,7 +451,37 @@ async def on_ready():
     await bot.tree.sync()                   # keep the global set
     print(f"Online as {bot.user}")
 
-# Final database check and Bot startup
+import discord
+from discord.ext import commands
+import asyncio
+import os
+
+intents = discord.Intents.default()
+intents.message_content = True
+
+try:
+    if 'bot' in globals():
+        asyncio.run_coroutine_threadsafe(bot.close(), asyncio.get_event_loop())
+except Exception:
+    pass
+
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# Safely register the on_ready handler if it exists in globals
+org_on_ready = globals().get('on_ready')
+if org_on_ready:
+    bot.add_listener(org_on_ready, 'on_ready')
+
+# Copy the command definitions dynamically to the new bot
+import sys
+import __main__
+for cmd in list(sys.modules['__main__'].__dict__.values()):
+    if isinstance(cmd, discord.app_commands.Command) or isinstance(cmd, discord.app_commands.Group):
+        try:
+            bot.tree.add_command(cmd)
+        except discord.app_commands.CommandAlreadyAdded:
+            pass
+
 try:
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(reports)")
@@ -462,11 +496,19 @@ try:
 except Exception as e:
     print(f"Database check failed: {e}")
 
-import asyncio
-
+# Asynchronous main execution designed for both Colab and local Python scripts (Render)
 async def main():
+    token = os.environ.get("DISCORD_BOT_TOKEN", "BOT_API")
     async with bot:
-        await bot.start("BOT_API")
+        await bot.start(token)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Run asyncio loop safely without throwing top-level awaits errors
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(main())
+        else:
+            asyncio.run(main())
+    except Exception as e:
+        print(f"Failed to start the bot runner loop: {e}")
