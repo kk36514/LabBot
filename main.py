@@ -11,6 +11,7 @@ from discord.ext import commands
 import anthropic
 import pandas as pd
 import folium
+from aiohttp import web
 
 # Colab compatibility — harmless on Render/local
 try:
@@ -90,6 +91,23 @@ async def check_access(interaction):
             await interaction.response.send_message(msg, ephemeral=True)
         return False
     return True
+
+
+# --- Keep-alive HTTP server (keeps Render free tier awake) ---
+
+async def handle_ping(request):
+    return web.Response(text="pong")
+
+
+async def start_keepalive_server():
+    app = web.Application()
+    app.router.add_get("/ping", handle_ping)
+    app.router.add_get("/", handle_ping)
+    port = int(os.environ.get("PORT", 8000))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    await web.TCPSite(runner, "0.0.0.0", port).start()
+    print(f"Keep-alive HTTP server listening on port {port}")
 
 
 # --- Core report / track ---
@@ -281,7 +299,7 @@ async def edit_report(interaction: discord.Interaction, report_id: int, field: s
     await interaction.response.defer(ephemeral=True)
     if not await check_access(interaction):
         return
-    valid_fields = ["org", "org", "action", "location", "notes", "tags", "lat", "lon"]
+    valid_fields = ["org", "action", "location", "notes", "tags", "lat", "lon"]
     if field not in valid_fields:
         await interaction.followup.send(f"Invalid field. Choose from: {', '.join(valid_fields)}", ephemeral=True)
         return
@@ -416,6 +434,7 @@ async def brief(interaction: discord.Interaction, org: str = DEFAULT_ORG):
     await interaction.response.defer()
     if not client:
         await interaction.followup.send("AI not configured.")
+        return
     rows = conn.execute("SELECT action, notes, timestamp FROM reports WHERE lower(org) = lower(?) LIMIT 10", (org,)).fetchall()
     data = "\n".join([str(r) for r in rows])
     resp = await client.messages.create(
@@ -472,6 +491,7 @@ async def main():
 
     if token:
         print("Starting bot instance...")
+        await start_keepalive_server()
         async with bot:
             await bot.start(token)
     else:
