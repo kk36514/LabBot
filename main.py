@@ -237,18 +237,23 @@ def render_dashboard():
 </html>"""
 
 async def handle_dashboard(request):
-    return web.Response(text=render_dashboard(), content_type="text/html")
-
-async def start_keepalive_server():
-    app = web.Application()
-    app.router.add_get("/ping", handle_ping)
-    app.router.add_get("/", handle_dashboard)
-    app.router.add_get("/dashboard", handle_dashboard)
-    port = int(os.environ.get("PORT", 8000))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", port).start()
-    print(f"Web server (dashboard + keep-alive) listening on port {port}")
+ async def handle_dashboard(request):
+    try:
+        return web.Response(text=render_dashboard(), content_type="text/html")
+    except Exception as e:
+        body = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>LabBot Intel</title>
+<style>
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0b0e14;color:#e8e8e8;padding:2rem;max-width:640px;margin:auto}}
+h1{{color:#ff4d4d}} code{{background:#1a1d24;padding:2px 6px;border-radius:4px;color:#ffb84d}}
+</style></head>
+<body>
+<h1>🛰️ Dashboard unavailable</h1>
+<p>Firebase isn't configured on this server yet.</p>
+<p>Set the <code>FIREBASE_SERVICE_ACCOUNT</code> env var on Render (the full service-account JSON from Firebase Console → Project settings → Service accounts), then redeploy.</p>
+<pre>{e}</pre>
+</body></html>"""
+        return web.Response(text=body, content_type="text/html", status=503)
 
 # --- Core report / track ---
 
