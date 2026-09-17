@@ -507,7 +507,7 @@ def render_dashboard():
                      if r.get("lat") is not None and r.get("lon") is not None)
 
     org_counts = {}
- action_counts = {}
+    action_counts = {}
     for r in reports.values():
         org_counts[r.get("org", "unknown")] = org_counts.get(r.get("org", "unknown"), 0) + 1
         action_counts[r.get("action", "?")] = action_counts.get(r.get("action", "?"), 0) + 1
