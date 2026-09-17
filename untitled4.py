@@ -468,4 +468,4 @@ except Exception as e:
 
 # Start the bot. The token should be kept secure in userdata,
 # but using your provided token for now:
-await bot.start("MTU0OTUyMDA0NTUzNTc5NzI1MQ.GOETa_._vtKRgWwguKGrPFrzv1zXRlWWGfcuWzCloqqxM")
+await bot.start("BOT_API")
