@@ -15,8 +15,6 @@ import anthropic
 
 drive.mount("/content/drive")
 
-!pip install discord.py
-
 import sqlite3
 import os
 
