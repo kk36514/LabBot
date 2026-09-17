@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """LabBot — Discord intel bot with Firebase Realtime Database persistence."""
 
-import discord, sqlite3, os, csv, io, datetime, asyncio
+import discord, os, io, datetime, asyncio
 from collections import Counter
 from discord.ext import commands
 import anthropic
@@ -14,11 +14,10 @@ from aiohttp import web
 import firebase_admin
 from firebase_admin import credentials, db
 
-DB_PATH = "intel.db"   # kept for local fallback / legacy; primary storage is Firebase
+DB_PATH = "intel.db"   # legacy SQLite fallback; primary storage is Firebase
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
-# Ensure the base table exists (legacy SQLite kept for compatibility)
 cursor.execute("""CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     org TEXT NOT NULL,
@@ -82,7 +81,7 @@ def get_reports_dict():
 def get_reports_sorted(limit=20):
     """Newest-first list of (id, report) tuples."""
     reports = get_reports_dict()
-    items = sorted(reports.items(), key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)
+    items = sorted(reports.items(), key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)
     return items[:limit]
 
 def save_report(report_dict):
@@ -110,8 +109,7 @@ def save_report(report_dict):
 
 def get_setting(key):
     if _firebase_ok:
-        val = db.reference(f"settings/{key}").get()
-        return val
+        return db.reference(f"settings/{key}").get()
     row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row[0] if row else None
 
@@ -124,7 +122,7 @@ def set_setting(key, value):
 
 def check_access(interaction):
     required = get_setting("required_role")
-    if required and not any(r.name.lower() == required.lower() for r in interaction.user.roles:
+    if required and not any(r.name.lower() == required.lower() for r in interaction.user.roles):
         return False
     return True
 
@@ -168,14 +166,15 @@ async def report(interaction: discord.Interaction, action: str, org: str = DEFAU
         await interaction.followup.send(f"✅ Report logged as `#{report_id}` for **{org}**.", ephemeral=True)
 
         # Check watches
-        watches = conn.execute("SELECT keyword, channel_id FROM watches").fetchall()
         if _firebase_ok:
             w = db.reference("watches").get() or {}
             watches = [(k, v.get("channel_id", "")) for k, v in w.items()]
+        else:
+            watches = conn.execute("SELECT keyword, channel_id FROM watches").fetchall()
         for kw, ch_id in watches:
             if kw.lower() in action.lower() or kw.lower() in notes.lower():
                 try:
-                    channel = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id)
+                    channel = bot.get_channel(int(ch_id)) or await bot.fetch_channel(int(ch_id))
                     if channel:
                         await channel.send(f"🚨 **Watch Alert!** Keyword `{kw}` matched in report `#{report_id}` ({org} - {action})")
                 except Exception:
@@ -187,13 +186,15 @@ async def report(interaction: discord.Interaction, action: str, org: str = DEFAU
 async def track(interaction: discord.Interaction, org: str = DEFAULT_ORG, limit: int = 10):
     await interaction.response.defer(ephemeral=True)
     if not check_access(interaction):
-        await interaction.followup.send("❌ No permission.", ephemeral=True); return
+        await interaction.followup.send("❌ No permission.", ephemeral=True)
+        return
     reports = get_reports_dict()
-    rows = [(rid, r) for rid, r in reports.items() if str(r.get("org", ""))).lower() == org.lower()]]
-    rows.sort(key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)
+    rows = [(rid, r) for rid, r in reports.items() if str(r.get("org", "")).lower() == org.lower()]
+    rows.sort(key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)
     rows = rows[:limit]
     if not rows:
-        await interaction.followup.send(f"No reports on **{org}** yet.", ephemeral=True); return
+        await interaction.followup.send(f"No reports on **{org}** yet.", ephemeral=True)
+        return
     lines = [f"• `#{rid}` **{r.get('action')}** — {r.get('location')} ({str(r.get('timestamp', ''))[:16]})" for rid, r in rows]
     await interaction.followup.send(embed=discord.Embed(title=f"Intel on {org}", description="\n".join(lines), color=discord.Color.red()))
 
@@ -202,28 +203,29 @@ async def track(interaction: discord.Interaction, org: str = DEFAULT_ORG, limit:
 @bot.tree.command(name="summary", description="Count actions per org")
 async def summary(interaction: discord.Interaction, org: str = DEFAULT_ORG):
     await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     reports = get_reports_dict()
-    counts = Counter(r.get("action", "?") for r in reports.values() if str(r.get("org", ""))).lower() == org.lower())
+    counts = Counter(r.get("action", "?") for r in reports.values() if str(r.get("org", "")).lower() == org.lower())
     if not counts:
-        await interaction.followup.send(f"No data for {org}."); return
+        await interaction.followup.send(f"No data for {org}.")
+        return
     desc = "\n".join([f"**{action}**: {count}" for action, count in counts.most_common()])
     await interaction.followup.send(embed=discord.Embed(title=f"Activity Summary: {org}", description=desc, color=discord.Color.blue()))
-
-
 
 @bot.tree.command(name="location", description="List sightings at a specific place")
 async def location(interaction: discord.Interaction, loc: str):
     await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     reports = get_reports_dict()
-    rows = [(rid, r) for rid, r in reports.items() if loc.lower() in str(r.get("location", ""))).lower()]
-    rows.sort(key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)
+    rows = [(rid, r) for rid, r in reports.items() if loc.lower() in str(r.get("location", "")).lower()]
+    rows.sort(key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)
     lines = [f"`#{rid}` **{r.get('org')}**: {r.get('action')} ({str(r.get('timestamp', ''))[:10]})" for rid, r in rows[:15]]
     if not lines:
-        await interaction.followup.send(f"No reports found for: {loc}"); return
+        await interaction.followup.send(f"No reports found for: {loc}")
+        return
     await interaction.followup.send(embed=discord.Embed(title=f"Sightings at {loc}", description="\n".join(lines)))
-
 
 @bot.tree.command(name="trend", description="Reports per day over the last N days")
 async def trend(interaction: discord.Interaction, days: int = 7):
@@ -236,60 +238,61 @@ async def trend(interaction: discord.Interaction, days: int = 7):
         if ts >= cutoff:
             days_count[ts[:10]] += 1
     if not days_count:
-        await interaction.followup.send("No recent data for trends."); return
-    msg = "\n".join([f"`{d}`: {c} reports" for d, c in sorted(days_count.items()]]))
+        await interaction.followup.send("No recent data for trends.")
+        return
+    msg = "\n".join([f"`{d}`: {c} reports" for d, c in sorted(days_count.items())])
     await interaction.followup.send(embed=discord.Embed(title=f"Intel Trend (Last {days} days)", description=msg))
 
-
 @bot.tree.command(name="timeline", description="Full chronological view of an org")
-async def timeline(interaction: discord.Interaction, org: str = DEFAULT_ORG:
+async def timeline(interaction: discord.Interaction, org: str = DEFAULT_ORG):
     await interaction.response.defer(ephemeral=True)
     reports = get_reports_dict()
-    rows = [(rid, r) for rid, r in reports.items() if str(r.get("org", ""))).lower() == org.lower()]
-    rows.sort(key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)
+    rows = [(rid, r) for rid, r in reports.items() if str(r.get("org", "")).lower() == org.lower()]
+    rows.sort(key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)
     msg = "\n".join([f"`{str(r.get('timestamp', ''))[:16]}`: {r.get('action')} - {r.get('notes', '')}" for rid, r in rows[:20]])
     if not msg:
-        await interaction.followup.send("No timeline data."); return
+        await interaction.followup.send("No timeline data.")
+        return
     await interaction.followup.send(embed=discord.Embed(title=f"Timeline: {org}", description=msg))
-
 
 @bot.tree.command(name="keywords", description="Search notes and actions for keywords")
 async def keywords(interaction: discord.Interaction, search_term: str):
     await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     reports = get_reports_dict()
     rows = [(rid, r) for rid, r in reports.items()
-            if search_term.lower() in str(r.get("notes", ""))).lower() or search_term.lower() in str(r.get("action", ""))).lower()]
-    rows.sort(key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)
+            if search_term.lower() in str(r.get("notes", "")).lower() or search_term.lower() in str(r.get("action", "")).lower()]
+    rows.sort(key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)
     lines = [f"`#{rid}` **{r.get('org')}**: {r.get('action')} - {str(r.get('notes', ''))[:50]}..." for rid, r in rows[:15]]
     if not lines:
-        await interaction.followup.send(f"No reports found for keywords: {search_term}"); return
+        await interaction.followup.send(f"No reports found for keywords: {search_term}")
+        return
     await interaction.followup.send(embed=discord.Embed(title=f"Keyword Search: {search_term}", description="\n".join(lines)))
 
-
 @bot.tree.command(name="stats", description="Overall intel stats")
-async def stats(interaction: discord.Interaction:
+async def stats(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     reports = get_reports_dict()
     total = len(reports)
     verified = sum(1 for r in reports.values() if r.get("verified"))
-    top = Counter(str(r.get("reported_by", "?"))) for r in reports.values()).most_common(1)
+    top = Counter(str(r.get("reported_by", "?")) for r in reports.values()).most_common(1)
     embed = discord.Embed(title="Global Intel Stats", color=discord.Color.gold())
     embed.add_field(name="Total Reports", value=str(total))
     embed.add_field(name="Verified", value=str(verified))
-    if top: embed.add_field(name="Top Reporter", value=f"{top[0][0]} ({top[0][1]})")
+    if top:
+        embed.add_field(name="Top Reporter", value=f"{top[0][0]} ({top[0][1]})")
     await interaction.followup.send(embed=embed)
 
-
-
 @bot.tree.command(name="heatmap", description="Render a folium map of geotagged reports")
-async def heatmap(interaction: discord.Interaction:
+async def heatmap(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     reports = get_reports_dict()
     rows = [(rid, r) for rid, r in reports.items() if r.get("lat") is not None and r.get("lon") is not None]
     if not rows:
-        await interaction.followup.send("No geotagged reports available to map."); return
-    map_center = [float(rows[0][1]["lat"]), float(rows[0][1]["lon"])] if rows else [0, 0]
+        await interaction.followup.send("No geotagged reports available to map.")
+        return
+    map_center = [float(rows[0][1]["lat"]), float(rows[0][1]["lon"])]
     m = folium.Map(location=map_center, zoom_start=2)
     for rid, r in rows:
         try:
@@ -305,18 +308,18 @@ async def heatmap(interaction: discord.Interaction:
 @bot.tree.command(name="edit_report", description="Edit a field of a report")
 async def edit_report(interaction: discord.Interaction, report_id: str, field: str, new_value: str):
     await interaction.response.defer(ephemeral=True)
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     valid_fields = ["org", "action", "location", "notes", "tags", "lat", "lon"]
     if field not in valid_fields:
-
-        await interaction.followup.send(f"Invalid field. Choose from: {', '.join(valid_fields)}"); return
-
+        await interaction.followup.send(f"Invalid field. Choose from: {', '.join(valid_fields)}")
+        return
     if field in ["lat", "lon"]:
         try:
             new_value = float(new_value)
         except ValueError:
-            await interaction.followup.send(f"Invalid value for {field}. Must be a number."); return
-
+            await interaction.followup.send(f"Invalid value for {field}. Must be a number.")
+            return
     if _firebase_ok:
         db.reference(f"reports/{report_id}/{field}").set(new_value)
     else:
@@ -324,10 +327,10 @@ async def edit_report(interaction: discord.Interaction, report_id: str, field: s
         conn.commit()
     await interaction.followup.send(f"✅ Report `#{report_id}` {field} updated to `{new_value}`.")
 
-
 @bot.tree.command(name="delete_report", description="Delete a report")
 async def delete_report(interaction: discord.Interaction, report_id: str):
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     if _firebase_ok:
         db.reference(f"reports/{report_id}").delete()
     else:
@@ -335,10 +338,10 @@ async def delete_report(interaction: discord.Interaction, report_id: str):
         conn.commit()
     await interaction.response.send_message(f"🗑️ Report `#{report_id}` deleted.")
 
-
 @bot.tree.command(name="verify", description="Mark a report as verified")
 async def verify(interaction: discord.Interaction, report_id: str):
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     if _firebase_ok:
         db.reference(f"reports/{report_id}/verified").set(1)
     else:
@@ -346,10 +349,10 @@ async def verify(interaction: discord.Interaction, report_id: str):
         conn.commit()
     await interaction.response.send_message(f"✅ Report `#{report_id}` verified.")
 
-
 @bot.tree.command(name="tag", description="Add tags to a report")
 async def tag(interaction: discord.Interaction, report_id: str, tags: str):
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     if _firebase_ok:
         db.reference(f"reports/{report_id}/tags").set(tags)
     else:
@@ -361,7 +364,8 @@ async def tag(interaction: discord.Interaction, report_id: str, tags: str):
 
 @bot.tree.command(name="watch", description="Alert a channel when a keyword appears")
 async def watch(interaction: discord.Interaction, keyword: str, channel: discord.TextChannel = None):
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     ch_id = str(channel.id) if channel else str(interaction.channel_id)
     if _firebase_ok:
         db.reference(f"watches/{keyword.lower()}").set({"channel_id": ch_id})
@@ -370,10 +374,10 @@ async def watch(interaction: discord.Interaction, keyword: str, channel: discord
         conn.commit()
     await interaction.response.send_message(f"👀 Watching for `{keyword}` in <#{ch_id}>.")
 
-
 @bot.tree.command(name="unwatch", description="Remove a keyword watch")
 async def unwatch(interaction: discord.Interaction, keyword: str):
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     if _firebase_ok:
         db.reference(f"watches/{keyword.lower()}").delete()
     else:
@@ -381,27 +385,27 @@ async def unwatch(interaction: discord.Interaction, keyword: str):
         conn.commit()
     await interaction.response.send_message(f"🚫 Stopped watching for `{keyword}`.")
 
-
 @bot.tree.command(name="digest_channel", description="Set the channel for daily intel digests")
 async def digest_channel(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not check_access(interaction): return
-    set_setting("digest_channel_id", str(channel.id)
+    if not check_access(interaction):
+        return
+    set_setting("digest_channel_id", str(channel.id))
     await interaction.response.send_message(f"✅ Daily intel digests will be sent to {channel.mention}.")
-
 
 @bot.tree.command(name="quiet_hours", description="Suppress digests between set hours (e.g., '22:00-06:00')")
 async def quiet_hours(interaction: discord.Interaction, hours_range: str = ""):
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     set_setting("quiet_hours", hours_range)
     if hours_range:
         await interaction.response.send_message(f"✅ Quiet hours set to {hours_range}.")
     else:
         await interaction.response.send_message("✅ Quiet hours disabled.")
 
-
 @bot.tree.command(name="role_required", description="Restrict commands to a role (blank = no restriction)")
 async def role_required(interaction: discord.Interaction, role_name: str = ""):
-    if not check_access(interaction): return
+    if not check_access(interaction):
+        return
     set_setting("required_role", role_name.lower())
     if role_name:
         await interaction.response.send_message(f"✅ Commands now restricted to users with the '{role_name}' role.")
@@ -414,9 +418,10 @@ async def role_required(interaction: discord.Interaction, role_name: str = ""):
 async def ask(interaction: discord.Interaction, question: str):
     await interaction.response.defer()
     if not client:
-        await interaction.followup.send("AI Client not configured."); return
+        await interaction.followup.send("AI Client not configured.")
+        return
     reports = get_reports_dict()
-    recent = sorted(reports.items(), key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)[:5]
+    recent = sorted(reports.items(), key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)[:5]
     context = "Recent Reports:\n" + "\n".join([f"{r.get('org')} did {r.get('action')}: {r.get('notes')}" for _, r in recent])
     resp = await client.messages.create(
         model="claude-3-haiku-20240307", max_tokens=500,
@@ -424,60 +429,58 @@ async def ask(interaction: discord.Interaction, question: str):
     )
     await interaction.followup.send(resp.content[0].text)
 
-
 @bot.tree.command(name="analyze", description="Analyze recent intel with context")
 async def analyze(interaction: discord.Interaction, prompt: str = "Summarize recent activity."):
     await interaction.response.defer()
     if not client:
-        await interaction.followup.send("AI Client not configured."); return
+        await interaction.followup.send("AI Client not configured.")
+        return
     reports = get_reports_dict()
-    recent = sorted(reports.items(), key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)[:10]
+    recent = sorted(reports.items(), key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)[:10]
     report_str = "\n".join([f"Org: {r.get('org')}, Action: {r.get('action')}, Notes: {r.get('notes')}, Timestamp: {r.get('timestamp')}" for _, r in recent])
     full_prompt = f"Based on the following recent intel reports, {prompt}:\n\n{report_str}\n\nAnalysis:"
     resp = await client.messages.create(
         model="claude-3-haiku-20240307", max_tokens=1000,
         messages=[{"role": "user", "content": full_prompt}]
     )
-    await interaction.followup.send(resp.content[0].text
-
+    await interaction.followup.send(resp.content[0].text)
 
 @bot.tree.command(name="brief", description="Generate a full AI brief on an org")
-async def brief(interaction: discord.Interaction, org: str = DEFAULT_ORG:
+async def brief(interaction: discord.Interaction, org: str = DEFAULT_ORG):
     await interaction.response.defer()
     if not client:
-        await interaction.followup.send("AI not configured."); return
+        await interaction.followup.send("AI not configured.")
+        return
     reports = get_reports_dict()
-    rows = [(rid, r) for rid, r in reports.items() if str(r.get("org", ""))).lower() == org.lower()]
-    rows.sort(key=lambda kv: str(kv[1].get("timestamp", ""))), reverse=True)
+    rows = [(rid, r) for rid, r in reports.items() if str(r.get("org", "")).lower() == org.lower()]
+    rows.sort(key=lambda kv: str(kv[1].get("timestamp", "")), reverse=True)
     data = "\n".join([str(r) for _, r in rows[:10]])
     resp = await client.messages.create(
         model="claude-3-haiku-20240307", max_tokens=1000,
         messages=[{"role": "user", "content": f"Provide a strategic brief for the organization '{org}' based on these logs: {data}"}]
     )
-    await interaction.followup.send(resp.content[0].text
+    await interaction.followup.send(resp.content[0].text)
 
 # --- System & Utility ---
 
 @bot.tree.command(name="export", description="Export all intel to CSV")
-async def export_intel(interaction: discord.Interaction:
+async def export_intel(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
     reports = get_reports_dict()
     df = pd.DataFrame.from_dict(reports, orient="index")
     if df.empty:
-
         df = pd.DataFrame(columns=["org", "action", "location", "notes", "reported_by", "timestamp"])
     buf = io.BytesIO()
     df.to_csv(buf, index=True, index_label="id")
     buf.seek(0)
     await interaction.followup.send("Full Export:", file=discord.File(buf, "intel_export.csv"))
 
-
 @bot.tree.command(name="help", description="List all commands")
-async def help_cmd(interaction: discord.Interaction:
-    h = "**Intel**: /report, /track, /summary, /location, /trend, /timeline, /keywords, /stats, /export, /heatmap\n" \
-        "**Alerts**: /watch, /unwatch, /digest_channel, /quiet_hours\n" \
-        "**Management**: /verify, /tag, /edit_report, /delete_report, /role_required\n" \
-        "**AI**: /ask, /analyze, /brief"
+async def help_cmd(interaction: discord.Interaction):
+    h = ("**Intel**: /report, /track, /summary, /location, /trend, /timeline, /keywords, /stats, /export, /heatmap\n"
+         "**Alerts**: /watch, /unwatch, /digest_channel, /quiet_hours\n"
+         "**Management**: /verify, /tag, /edit_report, /delete_report, /role_required\n"
+         "**AI**: /ask, /analyze, /brief")
     await interaction.response.send_message(embed=discord.Embed(title="LabBot Command List", description=h))
 
 GUILD_ID = 1549521458320113684  # your server ID
@@ -504,7 +507,7 @@ def render_dashboard():
                      if r.get("lat") is not None and r.get("lon") is not None)
 
     org_counts = {}
-    action_counts = {}
+ action_counts = {}
     for r in reports.values():
         org_counts[r.get("org", "unknown")] = org_counts.get(r.get("org", "unknown"), 0) + 1
         action_counts[r.get("action", "?")] = action_counts.get(r.get("action", "?"), 0) + 1
@@ -555,15 +558,15 @@ def render_dashboard():
     h1 {{ font-size: 1.5rem; font-weight: 700; letter-spacing: 0.5px; }}
     h1 span {{ color: #ff4d4d; }}
     .updated {{ margin-left: auto; color: #666; font-size: 0.8rem; }}
-    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:  ​1rem; margin-bottom: 2rem; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
     .card {{ background: #151922; border: 1px solid #232836; border-radius: 14px; padding: 1.1rem 1.2rem; transition: transform 0.15s; }}
     .card:hover {{ transform: translateY(-2px); }}
     .card .num {{ font-size: 2rem; font-weight: 800; }}
     .card .label {{ color: #8a8f9a; font-size: 0.8rem; margin-top: 0.2rem; }}
     .num.red {{ color: #ff4d4d; }} .num.green {{ color: #3ddc84; }} .num.blue {{ color: #4da3ff; }} .num.amber {{ color: #ffb84d; }}
-    .grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap:  ​1.5rem; margin-bottom: 1.5rem; }}
+    .grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; margin-bottom: 1.5rem; }}
     .panel {{ background: #151922; border: 1px solid #232836; border-radius: 14px; padding: 1.2rem; }}
-    .panel h2 {{ font-size: 0.95rem; color: #c8c8d0; margin-bottom:  ​1rem; letter-spacing: 0.3px; }}
+    .panel h2 {{ font-size: 0.95rem; color: #c8c8d0; margin-bottom: 1rem; letter-spacing: 0.3px; }}
     .bar-row {{ display: flex; align-items: center; gap: 0.7rem; margin-bottom: 0.55rem; }}
     .bar-label {{ width: 110px; font-size: 0.85rem; color: #cfd2da; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
     .bar-track {{ flex: 1; background: #1e232e; border-radius: 6px; height: 10px; overflow: hidden; }}
@@ -572,7 +575,7 @@ def render_dashboard():
     .bar-count {{ width: 30px; text-align: right; font-size: 0.85rem; color: #8a8f9a; }}
     table {{ width: 100%; border-collapse: collapse; }}
     th, td {{ padding: 0.65rem 0.8rem; text-align: left; font-size: 0.88rem; border-bottom: 1px solid #1e232e; }}
-    th {{ color: #ff4d4d; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing:  ​0.4px; }}
+    th {{ color: #ff4d4d; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.4px; }}
     tr:hover td {{ background: #191e28; }}
     .dim {{ color: #6a6f7a; }}
     .badge {{ display: inline-block; padding: 0.15rem 0.55rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600; background: #2a2e38; color: #9aa0ae; }}
