@@ -2,3 +2,4 @@ discord.py==2.7.1
 anthropic==1.6.0
 folium==0.20.0
 pandas
+firebase-admin>=6.0.0
