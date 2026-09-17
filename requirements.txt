@@ -1,0 +1,4 @@
+discord.py>=2.0.0
+anthropic>=0.18.0
+folium>=0.12.0
+sqlite3-api>=0.0.1
