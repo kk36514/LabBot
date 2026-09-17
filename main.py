@@ -462,6 +462,11 @@ try:
 except Exception as e:
     print(f"Database check failed: {e}")
 
-# Start the bot. The token should be kept secure in userdata,
-# but using your provided token for now:
-await bot.start("BOT_API")
+import asyncio
+
+async def main():
+    async with bot:
+        await bot.start("BOT_API")
+
+if __name__ == "__main__":
+    asyncio.run(main())
