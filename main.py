@@ -502,28 +502,39 @@ async def handle_ping(request):
     return web.Response(text="pong")
 
 def render_dashboard():
-    """Build the dashboard HTML from the reports table."""
+    """Build the polished dashboard HTML from the reports table."""
     total = conn.execute("SELECT COUNT(*) FROM reports").fetchone()[0]
     verified = conn.execute("SELECT COUNT(*) FROM reports WHERE verified = 1").fetchone()[0]
-    orgs = conn.execute(
-        "SELECT org, COUNT(*) as c FROM reports GROUP BY org ORDER BY c DESC"
-    ).fetchall()
-    actions = conn.execute(
-        "SELECT action, COUNT(*) as c FROM reports GROUP BY action ORDER BY c DESC LIMIT 10"
-    ).fetchall()
-    recent = conn.execute(
-        "SELECT id, org, action, location, timestamp FROM reports ORDER BY id DESC LIMIT 20"
-    ).fetchall()
+    geotagged = conn.execute("SELECT COUNT(*) FROM reports WHERE lat IS NOT NULL AND lon IS NOT NULL").fetchone()[0]
+    orgs = conn.execute("SELECT org, COUNT(*) as c FROM reports GROUP BY org ORDER BY c DESC LIMIT 8").fetchall()
+    actions = conn.execute("SELECT action, COUNT(*) as c FROM reports GROUP BY action ORDER BY c DESC LIMIT 8").fetchall()
+    recent = conn.execute("SELECT id, org, action, location, verified, timestamp FROM reports ORDER BY id DESC LIMIT 15").fetchall()
 
-    org_rows = "".join(
-        f"<tr><td>{org}</td><td>{count}</td></tr>" for org, count in orgs
-    ) or "<tr><td colspan=2>No data yet</td></tr>"
-    action_rows = "".join(
-        f"<tr><td>{action}</td><td>{count}</td></tr>" for action, count in actions
-    ) or "<tr><td colspan=2>No data yet</td></tr>"
+    max_org = max((c for _, c in orgs), default=1)
+    max_action = max((c for _, c in actions), default=1)
+
+    org_bars = "".join(
+        f'<div class="bar-row"><span class="bar-label">{org}</span>'
+        f'<div class="bar-track"><div class="bar" style="width:{int(count / max_org * 100)}%"></div></div>'
+        f'<span class="bar-count">{count}</span></div>'
+        for org, count in orgs
+    ) or '<div class="empty">No data yet</div>'
+
+    action_bars = "".join(
+        f'<div class="bar-row"><span class="bar-label">{action}</span>'
+        f'<div class="bar-track"><div class="bar alt" style="width:{int(count / max_action * 100)}%"></div></div>'
+        f'<span class="bar-count">{count}</span></div>'
+        for action, count in actions
+    ) or '<div class="empty">No data yet</div>'
+
     recent_rows = "".join(
-        f"<tr><td>#{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td><td>{r[4][:16]}</td></tr>" for r in recent
-    ) or "<tr><td colspan=5>No reports yet</td></tr>"
+        f'<tr><td class="dim">#{r[0]}</td><td>{r[1]}</td><td>{r[2]}</td><td>{r[3]}</td>'
+        f'<td>{"<span class=\"badge ok\">✓ Verified</span>" if r[4] else "<span class=\"badge\">Pending</span>"}</td>'
+        f'<td class="dim">{r[5][:16]}</td></tr>'
+        for r in recent
+    ) or '<tr><td colspan="6" class="empty">No reports yet</td></tr>'
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -532,39 +543,78 @@ def render_dashboard():
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LabBot Intel Dashboard</title>
 <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f1115; color: #e8e8e8; margin: 0; padding: 2rem; }}
-    h1 {{ color: #ff4d4d; margin-bottom: 0.25rem; }}
-    .sub {{ color: #888; margin-bottom: 2rem; }}
-    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1rem; margin-bottom: 2rem; }}
-    .card {{ background: #1a1d24; border: 1px solid #2a2e38; border-radius: 10px; padding: 1rem; }}
-    .card .num {{ font-size: 2rem; font-weight: 700; color: #ff4d4d; }}
-    .card .label {{ color: #999; font-size: 0.85rem; }}
-    h2 {{ color: #ccc; margin: 1.5rem 0 0.5rem; }}
-    table {{ width: 100%; border-collapse: collapse; background: #1a1d24; border-radius:  ical10px; overflow: hidden; }}
-    th, td {{ padding: 0.6rem 0.8rem; text-align: left; border-bottom:  ical1px solid #2a2e38; font-size: 0.9rem; }}
-    th {{ background: #23262e; color: #ff4d4d; font-weight: 600; }}
-    tr:hover td {{ background: #22252d; }}
-    .footer {{ margin-top: 2rem; color: #555; font-size: 0.8rem; }}
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0b0e14; color: #e8e8e8; min-height: 100vh; padding: 2rem; }}
+    .wrap {{ max-width: 1100px; margin: auto; }}
+    header {{ display: flex; align-items: center; gap: 1rem; margin-bottom: 2rem; }}
+    .logo {{ width: 44px; height:  ical44px; border-radius: 12px; background: linear-gradient(135deg, #ff4d4d, #ff8a3d); display: flex; align-items: center; justify-content: center; font-size: 1.4rem; box-shadow: 0 4px 20px rgba(255, 77, 77, 0.35); }}
+    h1 {{ font-size: 1.5rem; font-weight: 700; letter-spacing:  ical0.5px; }}
+    h1 span {{ color: #ff4d4d; }}
+    .updated {{ margin-left: auto; color: #666; font-size: 0.8rem; }}
+    .cards {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap:  ical1rem; margin-bottom:  ical2rem; }}
+    .card {{ background: #151922; border:  ical1px solid #232836; border-radius: 14px; padding: 1.1rem 1.2rem; transition: transform 0.15s; }}
+    .card:hover {{ transform: translateY(-2px); }}
+    .card .num {{ font-size: 2rem; font-weight:  ical800; }}
+    .card .label {{ color: #8a8f9a; font-size:  ical0.8rem; margin-top:  ical0.2rem; }}
+    .num.red {{ color: #ff4d4d; }} .num.green {{ color: #3ddc84; }} .num.blue {{ color: #4da3ff; }} .num.amber {{ color: #ffb84d; }}
+    .grid2 {{ display: grid; grid-template-columns: 1fr 1fr; gap:  ical1.5rem; margin-bottom:  ical1.5rem; }}
+    .panel {{ background: #151922; border:  ical1px solid #232836; border-radius:  ical14px; padding: 1.2rem; }}
+    .panel h2 {{ font-size: 0.95rem; color: #c8c8d0; margin-bottom:  ical1rem; letter-spacing:  ical0.3px; }}
+    .bar-row {{ display: flex; align-items: center; gap:  ical0.7rem; margin-bottom:  ical0.55rem; }}
+    .bar-label {{ width: 110px; font-size:  ical0.85rem; color: #cfd2da; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+    .bar-track {{ flex: 1; background: #1e232e; border-radius: 6px; height:  ical10px; overflow: hidden; }}
+    .bar {{ height: 100%; background: linear-gradient(90deg, #ff4d4d, #ff8a3d); border-radius:  ical6px; min-width:  ical2px; }}
+    .bar.alt {{ background: linear-gradient(90deg, #4da3ff, #3ddc84); }}
+    .bar-count {{ width: 30px; text-align: right; font-size:  ical0.85rem; color: #8a8f9a; }}
+    table {{ width: 100%; border-collapse: collapse; }}
+    th, td {{ padding: 0.65rem 0.8rem; text-align: left; font-size:  ical0.88rem; border-bottom:  ical1px solid #1e232e; }}
+    th {{ color: #ff4d4d; font-weight: 600; font-size:  ical0.8rem; text-transform: uppercase; letter-spacing:  ical0.4px; }}
+    tr:hover td {{ background: #191e28; }}
+    .dim {{ color: #6a6f7a; }}
+    .badge {{ display: inline-block; padding: 0.15rem 0.55rem; border-radius:  ical999px; font-size:  ical0.72rem; font-weight:  ical600; background: #2a2e38; color: #9aa0ae; }}
+    .badge.ok {{ background: rgba(61, 220, 132, 0.15); color: #3ddc84; }}
+    .empty {{ color: #5a5f6a; text-align: center; padding: 1.5rem; }}
+    .footer {{ margin-top: 2rem; color: #4a4f5a; font-size:  ical0.78rem; text-align: center; }}
+    @media (max-width: 800px) {{ .grid2 {{ grid-template-columns: 1fr; }} body {{ padding: 1rem; }} .bar-label {{ width: 80px; }} }}
 </style>
 </head>
 <body>
-    <h1>🛰️ LabBot Intel</h1>
-    <div class="sub">Live intel database — auto-refreshes</div>
+<div class="wrap">
+    <header>
+        <div class="logo">🛰️</div>
+        <h>LabBot <span>Intel</span></h1>
+        <div class="updated">Updated {now}</div>
+    </header>
+
     <div class="cards">
-        <div class="card"><div class="num">{total}</div><div class="label">Total Reports</div></div>
-        <div class="card"><div class="num">{verified}</div><div class="label">Verified</div></div>
-        <div class="card"><div class="num">{len(orgs)}</div><div class="label">Organizations</div></div>
+        <div class="card"><div class="num red">{total}</div><div class="label">Total Reports</div></div>
+        <div class="card"><div class="num green">{verified}</div><div class="label">Verified</div></div>
+        <div class="card"><div class="num blue">{geotagged}</div><div class="label">Geotagged</div></div>
+        <div class="card"><div class="num amber">{len(orgs)}</div><div class="label">Organizations</div></div>
     </div>
-    <h2>Activity by Organization</h2>
-    <table><thead><tr><th>Organization</th><th>Reports</th></tr></thead><tbody>{org_rows}</tbody></table>
-    <h2>Top Actions</h2>
-    <table><thead><tr><th>Action</th><th>Count</th></tr></thead><tbody>{action_rows}</tbody></table>
-    <h2>Recent Reports</h2>
-    <table><thead><tr><th>ID</th><th>Org</th><th>Action</th><th>Location</th><th>Timestamp</th></tr></thead><tbody>{recent_rows}</tbody></table>
-    <div class="footer">LabBot — auto-refreshes every 60s</div>
-    <script>
-        setTimeout(() => location.reload(), 60000);
-    </script>
+
+    <div class="grid2">
+        <div class="panel">
+            <h2>Activity by Organization</h2>
+            {org_bars}
+        </div>
+        <div class="panel">
+            <h2>Top Actions</h2>
+            {action_bars}
+        </div>
+    </div>
+
+    <div class="panel">
+        <h2>Recent Reports</h2>
+        <table>
+            <thead><tr><th>ID</th><th>Org</th><th>Action</th><th>Location</th><th>Status</th><th>Timestamp</th></tr></thead>
+            <tbody>{recent_rows}</tbody>
+        </table>
+    </div>
+
+    <div class="footer">LabBot Intel — auto-refreshes every 60s</div>
+</div>
+<script>setTimeout(() => location.reload(), 60000);</script>
 </body>
 </html>"""
 
